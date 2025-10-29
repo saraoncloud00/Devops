@@ -403,5 +403,154 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - C
+    - CreateNamespace=true
 ```
+
+---
+
+## 9) CI/CD (GitHub Actions)
+
+`ci-cd/github/pipeline.yml`
+
+```yaml
+name: ci-cd
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+    - name: Login to ECR
+      id: ecr
+      uses: aws-actions/amazon-ecr-login@v2
+    - name: Build
+      run: |
+        IMAGE=${{ steps.ecr.outputs.registry }}/data-pipeline/api:${{ github.sha }}
+        docker build -f docker/api.Dockerfile -t $IMAGE .
+        docker push $IMAGE
+        echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+    - name: Update K8s manifests (set image tag)
+      run: |
+        sed -i "s#__TAG__#${{ github.sha }}#" k8s/api/deployment.yaml
+        git diff | cat
+    - name: Commit & push manifest change
+      run: |
+        git config user.email "bot@users.noreply.github.com"
+        git config user.name "ci-bot"
+        git add k8s/api/deployment.yaml
+        git commit -m "ci: deploy ${{ github.sha }}" || echo "no changes"
+        git push
+```
+
+> ArgoCD will sync automatically from the repo.
+
+---
+
+## 10) Observability
+
+* **Prometheus**: scrape API `/metrics` (add `prometheus-fastapi-instrumentator` or custom metrics).
+* **Grafana**: Dashboards for API latency, throughput, HPA metrics, Kafka consumer lag, Spark job success.
+* **Alertmanager**: Alerts on high error rate, pod restarts, Kafka lag > threshold.
+
+Example alert (YAML):
+
+```yaml
+groups:
+- name: api.rules
+  rules:
+  - alert: High5xxRate
+    expr: sum(rate(http_requests_total{status=~"5.."}[5m])) > 5
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: High 5xx rate on API
+```
+
+---
+
+## 11) Logging
+
+* **Loki + Promtail** for cluster logs
+* Optional: **OpenSearch** for full‑text log search
+
+---
+
+## 12) Secrets & Security
+
+* Use **IRSA** for service accounts (no node credentials).
+* Store DB passwords in **AWS Secrets Manager**; sync to K8s Secret via `external-secrets` operator.
+* Enforce **RBAC** and namespace boundaries.
+* Enable **TLS** on Ingress with ACM.
+
+---
+
+## 13) Scaling & Deployment strategies
+
+* **HPA** for API & Spark workers
+* Canary or Blue/Green via **Argo Rollouts** (optional):
+
+```bash
+helm repo add argo https://argoproj.github.io/argo-helm
+helm install argo-rollouts argo/argo-rollouts -n argo-rollouts --create-namespace
+```
+
+---
+
+## 14) Cost & Cleanup
+
+* Prefer managed services (EKS + Fargate for small clusters) or scale node groups to zero in off hours.
+* `terraform destroy` to clean resources.
+
+---
+
+## 15) Smoke tests & load tests
+
+* Simple bash script hitting `/healthz` & `/metrics`.
+* Add `k6` or `vegeta` tests; wire into CI and alert on regressions.
+
+---
+
+## 16) Milestone checklist (commit‑by‑commit)
+
+1. Repo scaffold + minimal FastAPI app
+2. Dockerize API; local compose works
+3. Terraform VPC + EKS + ECR; `kubectl get nodes` OK
+4. Helm: ALB controller + metrics server installed
+5. Push first image to ECR
+6. K8s manifests (namespace, deploy, svc, ingress) → API reachable via ALB
+7. ArgoCD bootstrap + auto‑sync from repo
+8. GitHub Actions builds/pushes and updates manifests
+9. Monitoring stack + Grafana dashboard committed
+10. Alerts firing to Slack/Teams
+11. Add Spark job + Kafka producer/consumer
+12. HPA validated with load test; canary rollout demo
+
+---
+
+## 17) What to put in README.md
+
+* Architecture diagram
+* Tech stack badges
+* One‑click setup steps
+* CI/CD + GitOps flow picture
+* Screenshots: Grafana, ArgoCD, API endpoint, ALB DNS
+
+---
+
+## 18) Next steps
+
+* Replace placeholders (`<acct>`, `<region>`, `api.example.com`).
+* I can generate this repo skeleton with boilerplate files if you want.
